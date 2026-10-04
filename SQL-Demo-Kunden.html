@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <title>SQL-Emulator (Demo)</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      margin: 20px;
+    }
+    textarea {
+      width: 100%;
+      height: 50px;
+      font-family: monospace;
+      font-size: 20px;   /* Größerer Font */
+    }
+    table {
+      border-collapse: collapse;
+      margin-top: 15px;
+    }
+    th, td {
+      border: 1px solid #ccc;
+      padding: 4px 8px;
+    }
+    th {
+      background: #eee;
+    }
+    #error {
+      color: darkred;
+      margin-top: 10px;
+      white-space: pre-wrap;
+    }
+  </style>
+</head>
+<body>
+<h1>SQL-Emulator für Tabelle "Kunden"</h1>
+
+<p>Feste Tabelle: <strong>kunden</strong> mit Spalten:
+  <code>KdNr, Firma, Name, Ort, PLZ, Umsatz</code></p>
+
+<!-- Extra-Div für komplette Tabelle -->
+<h2>Komplette Tabelle</h2>
+<div id="allTable"></div>
+<p>
+
+<textarea id="sqlInput">SELECT * FROM kunden;</textarea><br>
+<button id="runBtn">Ausführen</button>
+
+<div id="error"></div>
+<div id="result"></div>
+
+<script>
+// Feste Tabelle (Demo-Daten)
+const TABLE_NAME = "kunden";
+const data = [
+  { KdNr: 1,  Firma: "Maier KG",             Name: "Maier", Ort: "Dresden",    PLZ: "01097", Umsatz: 2312  },
+  { KdNr: 2,  Firma: "Maier KG",             Name: "Müller",  Ort: "Osnabrück",  PLZ: "49076", Umsatz: 22728 },
+  { KdNr: 3,  Firma: "Mayer & Söhne GmbH",   Name: "Schulze",  Ort: "Leipzig",    PLZ: "04288", Umsatz: 15005 },
+  { KdNr: 4,  Firma: "Müller OHG",           Name: "Meisel",   Ort: "Bad Homburg",PLZ: "61350", Umsatz: 450   },
+  { KdNr: 5,  Firma: "Böger",                Name: "Böger", Ort: "Dresden",    PLZ: "01056", Umsatz: 98334 },
+  { KdNr: 6,  Firma: "Hannibal",             Name: "Kunz",  Ort: "Bad Essen",  PLZ: "49152", Umsatz: 0     },
+  { KdNr: 7,  Firma: "Wünsche GbR",          Name: "Wünche",  Ort: "Bad Essen",  PLZ: "49152", Umsatz: 1200  },
+  { KdNr: 8,  Firma: "Rumsfeld",             Name: "Rumsfeld", Ort: "Freiburg",   PLZ: "79100", Umsatz: 2000  },
+  { KdNr: 9,  Firma: "Schulze",              Name: "Karlson",  Ort: "Köln",       PLZ: "50859", Umsatz: 0     },
+  { KdNr: 11, Firma: "Bauer OHG",            Name: "",    Ort: "Osnabrück",  PLZ: "49123", Umsatz: 0     }
+];
+
+// Hilfsfunktionen
+function showError(msg) {
+  document.getElementById("error").textContent = "Fehler: " + msg;
+  document.getElementById("result").innerHTML = "";
+}
+
+function clearError() {
+  document.getElementById("error").textContent = "";
+}
+
+function renderTableInto(containerId, rows, columns) {
+  const container = document.getElementById(containerId);
+  if (!rows.length) {
+    container.innerHTML = "<p>Keine Zeilen gefunden.</p>";
+    return;
+  }
+
+  let html = "<table><thead><tr>";
+  columns.forEach(col => html += "<th>" + col + "</th>");
+  html += "</tr></thead><tbody>";
+
+  rows.forEach(row => {
+    html += "<tr>";
+    columns.forEach(col => {
+      html += "<td>" + (row[col] !== undefined ? row[col] : "") + "</td>";
+    });
+    html += "</tr>";
+  });
+
+  html += "</tbody></table>";
+  container.innerHTML = html;
+}
+
+// Hilfsfunktion Wildcards (*, ?) -> RegExp
+function wildcardToRegExp(pattern) {
+  // Sonderzeichen escapen
+  let esc = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  esc = esc.replace(/\*/g, ".*").replace(/\?/g, ".");
+  return new RegExp("^" + esc + "$", "i");
+}
+
+// Sehr einfacher Parser für SELECT-Kommandos
+function executeSQL(sql) {
+  clearError();
+  sql = sql.trim().replace(/;$/, ""); // Semikolon entfernen
+
+  // Optionales ORDER BY am Ende abtrennen
+  let orderByColumn = null;
+  let orderDesc = false;
+  let orderMatch = /\s+ORDER\s+BY\s+(\w+)(\s+DESC)?$/i.exec(sql);
+  if (orderMatch) {
+    orderByColumn = orderMatch[1];
+    orderDesc = !!orderMatch[2];
+    // ORDER BY Teil aus dem SQL entfernen für den SELECT/WHERE-Parser
+    sql = sql.slice(0, orderMatch.index).trim();
+  }
+  
+  // SELECT ... FROM ... [WHERE ...]
+  const selectMatch = /^SELECT\s+(.+)\s+FROM\s+(\w+)(?:\s+WHERE\s+(.+))?$/i.exec(sql);
+  if (!selectMatch) {
+    showError("Unterstützt: SELECT ... FROM kunden [WHERE ...] [ORDER BY Spalte [DESC]]");
+    return;
+  }
+
+  let columnPart = selectMatch[1].trim();
+  const tableName = selectMatch[2].trim();
+  const wherePart = selectMatch[3] ? selectMatch[3].trim() : null;
+
+  if (tableName.toLowerCase() !== TABLE_NAME.toLowerCase()) {
+    showError("Nur Tabelle '" + TABLE_NAME + "' ist verfügbar.");
+    return;
+  }
+
+  // Spalten bestimmen
+  let columns;
+  const allColumns = Object.keys(data[0]);
+
+  if (columnPart === "*") {
+    columns = allColumns;
+  } else {
+    columns = columnPart.split(",").map(c => c.trim());
+    // Validierung
+    for (const col of columns) {
+      if (!allColumns.includes(col)) {
+        showError("Unbekannte Spalte: " + col);
+        return;
+      }
+    }
+  }
+
+  // WHERE-Bedingung anwenden (sehr eingeschränkter Parser)
+  let rows = data.slice(); // Kopie
+  if (wherePart) {
+    // BETWEEN: col BETWEEN x AND y
+    const betweenRegex = /^(\w+)\s+BETWEEN\s+(.+)\s+AND\s+(.+)$/i;
+    const bm = betweenRegex.exec(wherePart);
+  
+    if (bm) {
+      const col = bm[1];
+      let val1Raw = bm[2].trim();
+      let val2Raw = bm[3].trim();
+      if (!allColumns.includes(col)) {
+        showError("Unbekannte Spalte in BETWEEN: " + col);
+        return;
+      }
+      function parseVal(raw) {
+        if ((raw.startsWith("'") && raw.endsWith("'")) ||
+            (raw.startsWith('"') && raw.endsWith('"'))) {
+          return raw.slice(1, -1);
+        }
+        const num = Number(raw);
+        return isNaN(num) ? raw : num;
+      }
+      const v1 = parseVal(val1Raw);
+      const v2 = parseVal(val2Raw);
+
+      rows = rows.filter(row => {
+        const f = row[col];
+        return f >= v1 && f <= v2;
+      });
+    } 
+
+    if (!bm) {
+      // Unterstützt: col = 'Text', col != 'Text', col > Zahl, col < Zahl, col >= Zahl, col <= Zahl
+      // ohne AND/OR, nur ein Ausdruck
+      const whereRegex = /^(\w+)\s*(=|!=|>=|<=|>|<|LIKE)\s*(.+)$/i;
+      const m = whereRegex.exec(wherePart);
+      if (!m) {
+        showError("WHERE wird unterstützt als: Spalte = 123, Spalte LIKE 'M*', Spalte BETWEEN 1000 AND 2000 usw.");
+        return;
+      }
+
+      const col = m[1];
+      const op = m[2];
+      let valueRaw = m[3].trim();
+
+      if (!allColumns.includes(col)) {
+        showError("Unbekannte Spalte in WHERE: " + col);
+        return;
+      }
+
+      // String in Anführungszeichen?
+     let value;
+      let isString = false;
+      if ((valueRaw.startsWith("'") && valueRaw.endsWith("'")) ||
+          (valueRaw.startsWith('"') && valueRaw.endsWith('"'))) {
+        value = valueRaw.slice(1, -1);
+        isString = true;
+      } else {
+        const num = Number(valueRaw);
+        if (!isNaN(num)) {
+          value = num;
+        } else {
+          value = valueRaw;
+        }
+      }
+
+      let wildcardRegex = null;
+      if (op === "LIKE") {
+        if (!isString) {
+          showError("LIKE wird nur mit Zeichenketten unterstützt, z.B. LIKE 'M*'.");
+          return;
+        }
+        wildcardRegex = wildcardToRegExp(value);
+      }
+      
+      rows = rows.filter(row => {
+        const field = row[col];
+        
+        if (wildcardRegex) {
+          const match = wildcardRegex.test(String(field));
+          console.log(match)
+          return op === "LIKE" ? match : !match;
+        }
+        
+        switch (op) {
+          case "=":  return field == value;
+          case "!=": return field != value;
+          case ">":  return field > value;
+          case "<":  return field < value;
+          case ">=": return field >= value;
+          case "<=": return field <= value;
+          default:   return false;
+        }
+      });
+    }
+    
+  }
+
+  // ORDER BY
+  if (orderByColumn) {
+    if (!allColumns.includes(orderByColumn)) {
+      showError("Unbekannte Spalte in ORDER BY: " + orderByColumn);
+      return;
+    }
+    rows.sort((a, b) => {
+      const va = a[orderByColumn];
+      const vb = b[orderByColumn];
+      if (va == null && vb == null) return 0;
+      if (va == null) return orderDesc ? 1 : -1;
+      if (vb == null) return orderDesc ? -1 : 1;
+      if (va < vb) return orderDesc ? 1 : -1;
+      if (va > vb) return orderDesc ? -1 : 1;
+      return 0;
+    });
+  }
+  
+  renderTableInto("result", rows, columns);
+}
+
+// Event-Handler
+document.getElementById("runBtn").addEventListener("click", () => {
+  const sql = document.getElementById("sqlInput").value;
+  executeSQL(sql);
+});
+
+// global machen
+window.executeSQL = executeSQL;
+
+// GANZE TABELLE BEIM START ANZEIGEN:
+// komplette Tabelle beim Laden im extra Div anzeigen
+const allColumns = Object.keys(data[0]);
+renderTableInto("allTable", data, allColumns);
+
+</script>
+</body>
+</html>
